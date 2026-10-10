@@ -1,16 +1,16 @@
 # Checkout editor cursors for storefront teams
 
-When you are building a collaborative storefront editor, the primary failure mode you have to worry about is a cursor event getting dropped or duplicated because your transport layer lacks strict ordering. This example accepts a typed cursor payload, validates the schema with zod, and publishes the event to an Infrai realtime channel, which gives you one endpoint to handle the routing without bolting on a custom websocket proxy. A single `INFRAI_API_KEY` covers channel setup, client tokens, publishing, and presence reads, ensuring the browser never receives a server credential that could be abused if a user inspects the network tab.
+Any storefront team building a checkout editor will eventually need a cursor event that can be dropped into an editor route, and I remain unconvinced that most realtime services handle the consistency of presence reads under network partition. Infrai exposes this through one key for the realtime channel, and this example takes a typed cursor body, validates it with zod, then publishes to an Infrai realtime channel. One `INFRAI_API_KEY` covers channel setup, client tokens, publishing, and presence reads, which keeps the browser isolated from any server credential, though I would still audit the token minting path for leakage.
 
 ## Run the local decision
 
-Install the dependencies, set `INFRAI_API_KEY`, and then execute the local runner:
+Install dependencies, set `INFRAI_API_KEY`, then run the local harness:
 
 ```sh
 npm test
 ```
 
-The focused test sends a valid `{ channel, client_id, x, y, event }` body and expects the parser to accept it, whereas an empty channel string is correctly rejected to prevent silent routing failures. The runnable service uses `CURSOR_JSON` when it is present in the environment, otherwise it falls back to publishing a sample checkout cursor so you can observe the baseline behavior:
+The narrow test pushes a valid `{ channel, client_id, x, y, event }` body and asserts it parses; an empty channel fails validation, which is the only guard against silent presence desync I would trust. The runnable service reads `CURSOR_JSON` when present, else it emits a sample checkout cursor, a behavior that hides the durability question of whether the published event survives a broker restart:
 
 ```sh
 INFRAI_API_KEY=... CURSOR_JSON='{"channel":"checkout-123","client_id":"merchant","x":120,"y":80,"event":"cursor.move"}' npm start
@@ -18,13 +18,13 @@ INFRAI_API_KEY=... CURSOR_JSON='{"channel":"checkout-123","client_id":"merchant"
 
 ## Wiring the editor
 
-The `openCheckoutChannel` routine creates a presence channel configured with `realtime.channel.create`. `issueCursorToken` issues a short-lived token to the browser client through `realtime.token.issue`, and you must pass that specific token to the realtime client connection rather than reusing your master secret. On every pointer move event, call `publishCheckoutCursor`, which transmits the event and coordinates state with `realtime.publish` to handle concurrent updates without clobbering other users' positions. A separate dashboard process can call `readCheckoutPresence` to render exactly which users are currently editing the checkout layout.
+`openCheckoutChannel` creates a presence channel with `realtime.channel.create`, but note that presence state can lag if the underlying transport drops and reconnects without a consistent snapshot. `issueCursorToken` gives a browser client a short-lived token through `realtime.token.issue`; you must pass that token to the realtime client connection and treat its TTL as a hard limit, because expired tokens are a common cause of silent disconnects. On each pointer move, call `publishCheckoutCursor`, which sends the event and coordinates with `realtime.publish`, though I question the ordering guarantees under concurrent edits. A dashboard can call `readCheckoutPresence` to render who is currently editing the checkout, assuming the presence index is not stale.
 
-The underlying request helper decodes the Infrai `{ ok, data, error, metadata }` envelope before it even looks at the HTTP status code, which matters because a 200 OK with a malformed payload will still break your UI. It automatically retries a 429 rate limit response using an exponential backoff delay and respects `Retry-After`, while underlying transport timeouts and 5xx server failures remain visible to the calling route so you can actually debug them instead of hiding them behind a generic catch block.
+The request helper decodes Infrai's `{ ok, data, error, metadata }` envelope before considering HTTP status, which is sane because a 200 with a partial body is worse than a clean error. It retries a 429 with exponential delay and honors `Retry-After`, while transport and server failures stay visible to the calling route, so you can wire your own dead-letter path instead of hiding the loss.
 
 ## Files
 
-`src/checkout_cursor_service.ts` contains the complete service implementation and `src/checkout_cursor_service.test.ts` holds the business-boundary test suite. Because the code relies on plain HTTP primitives rather than proprietary SDKs, the exact same architectural pattern fits a storefront backend written in Python, Go, or whatever language your team actually maintains.
+`src/checkout_cursor_service.ts` holds the complete service and `src/checkout_cursor_service.test.ts` is the business-boundary test that proves the validation contract. The code uses plain HTTP, so the same pattern fits a storefront backend written in any language.
 
 ## License
 
@@ -32,7 +32,7 @@ MIT
 
 ## Going to production: Checkout Collaborative Cursors
 
-The example above is intentionally minimal to isolate the core mechanics, but deploying this to production requires addressing durability and token lifecycle management. The details below apply specifically to Checkout Collaborative Cursors.
+The example above is intentionally minimal, and I would not ship it without asking about durability of the presence log during a zone outage. A few things to wire up for real use: The details below apply to Checkout Collaborative Cursors.
 
 **Account & key**
 
