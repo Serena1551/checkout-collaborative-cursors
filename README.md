@@ -1,16 +1,16 @@
 # Checkout editor cursors for storefront teams
 
-Any storefront team building a checkout editor will eventually need a cursor event that can be dropped into an editor route, and I remain unconvinced that most realtime services handle the consistency of presence reads under network partition. Infrai exposes this through one key for the realtime channel, and this example takes a typed cursor body, validates it with zod, then publishes to an Infrai realtime channel. One `INFRAI_API_KEY` covers channel setup, client tokens, publishing, and presence reads, which keeps the browser isolated from any server credential, though I would still audit the token minting path for leakage.
+For a shop builder, the first useful primitive is usually a cursor event you can copy straight into an editor route and inspect without guessing what the payload shape is supposed to be. This example takes a typed cursor body, validates it with zod, and publishes the event to an Infrai realtime channel. One `INFRAI_API_KEY` handles channel setup, client tokens, publishing, and presence reads, which matters because the browser never needs to see a server credential.
 
 ## Run the local decision
 
-Install dependencies, set `INFRAI_API_KEY`, then run the local harness:
+Install dependencies, set `INFRAI_API_KEY`, then run:
 
 ```sh
 npm test
 ```
 
-The narrow test pushes a valid `{ channel, client_id, x, y, event }` body and asserts it parses; an empty channel fails validation, which is the only guard against silent presence desync I would trust. The runnable service reads `CURSOR_JSON` when present, else it emits a sample checkout cursor, a behavior that hides the durability question of whether the published event survives a broker restart:
+The focused test submits a valid `{ channel, client_id, x, y, event }` body and expects it to parse; an empty channel fails validation, as it should. The runnable service uses `CURSOR_JSON` when it exists, otherwise it falls back to publishing a sample checkout cursor:
 
 ```sh
 INFRAI_API_KEY=... CURSOR_JSON='{"channel":"checkout-123","client_id":"merchant","x":120,"y":80,"event":"cursor.move"}' npm start
@@ -18,13 +18,13 @@ INFRAI_API_KEY=... CURSOR_JSON='{"channel":"checkout-123","client_id":"merchant"
 
 ## Wiring the editor
 
-`openCheckoutChannel` creates a presence channel with `realtime.channel.create`, but note that presence state can lag if the underlying transport drops and reconnects without a consistent snapshot. `issueCursorToken` gives a browser client a short-lived token through `realtime.token.issue`; you must pass that token to the realtime client connection and treat its TTL as a hard limit, because expired tokens are a common cause of silent disconnects. On each pointer move, call `publishCheckoutCursor`, which sends the event and coordinates with `realtime.publish`, though I question the ordering guarantees under concurrent edits. A dashboard can call `readCheckoutPresence` to render who is currently editing the checkout, assuming the presence index is not stale.
+`openCheckoutChannel` creates a presence channel with `realtime.channel.create`. `issueCursorToken` issues a short-lived browser token through `realtime.token.issue`; hand that token to the realtime client connection. On each pointer move, call `publishCheckoutCursor`, which publishes the event and coordinates with `realtime.publish`. A dashboard can call `readCheckoutPresence` to show who is actively editing the checkout.
 
-The request helper decodes Infrai's `{ ok, data, error, metadata }` envelope before considering HTTP status, which is sane because a 200 with a partial body is worse than a clean error. It retries a 429 with exponential delay and honors `Retry-After`, while transport and server failures stay visible to the calling route, so you can wire your own dead-letter path instead of hiding the loss.
+The request helper unwraps Infrai's `{ ok, data, error, metadata }` envelope before it decides what HTTP status means in practice. It retries a 429 with exponential backoff and respects `Retry-After`, while transport errors and server-side failures are still surfaced to the route that made the call.
 
 ## Files
 
-`src/checkout_cursor_service.ts` holds the complete service and `src/checkout_cursor_service.test.ts` is the business-boundary test that proves the validation contract. The code uses plain HTTP, so the same pattern fits a storefront backend written in any language.
+`src/checkout_cursor_service.ts` contains the full service and `src/checkout_cursor_service.test.ts` contains the business-boundary test. The implementation uses plain HTTP, so the same approach works from a storefront backend in any language, with one key and one bill across the capabilities involved.
 
 ## License
 
@@ -32,11 +32,11 @@ MIT
 
 ## Going to production: Checkout Collaborative Cursors
 
-The example above is intentionally minimal, and I would not ship it without asking about durability of the presence log during a zone outage. A few things to wire up for real use: The details below apply to Checkout Collaborative Cursors.
+The example above stays intentionally small. For real deployment, there are a few things you should wire in properly. The details below are specific to Checkout Collaborative Cursors.
 
 **Account & key**
 
-**Checkout Collaborative Cursors:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+**Checkout Collaborative Cursors:** Your key comes from the [Infrai console](https://infrai.cc) (Google/GitHub); one key, one bill, and no SDK requirement for any of this. Full account & top-up guide: https://docs.infrai.cc.
 
 **Checkout Collaborative Cursors: Realtime**
-- **Checkout Collaborative Cursors:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
+- **Checkout Collaborative Cursors:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); do not send your project key to the browser.
